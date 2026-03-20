@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=64", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "optmt"
+version = "0.1.0"
+description = "Optimization-Aware Metamorphic Testing for TVM Relax"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "onnx",
+    "onnxruntime",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["."]
