@@ -83,6 +83,81 @@ class PatternPool:
         return r.sample(self._entries, min(k, len(self._entries)))
 
     def load_all(self) -> int:
+        """Load all valid patterns from pattern_library/."""
+        # Clear existing entries to allow safe repeated calls
+        self._entries.clear()
+        self._by_category.clear()
+
+        metadata_path = self.root / "_pattern_metadata.json"
+        if not metadata_path.exists():
+            raise FileNotFoundError(f"Metadata file not found: {metadata_path}")
+
+        with open(metadata_path, "r", encoding="utf-8") as f:
+            metadata = json.load(f)
+
+        skipped_reasons: Dict[str, int] = {}
+        loaded_count = 0
+
+        for rel_path, info in metadata.items():
+            # 1. Filter checks
+            reason = self._should_exclude(rel_path, info)
+            if reason:
+                skipped_reasons[reason] = skipped_reasons.get(reason, 0) + 1
+                continue
+
+            # 2. File existence checks
+            onnx_path = self.root / rel_path
+            if not onnx_path.exists():
+                skipped_reasons["file_missing"] = skipped_reasons.get("file_missing", 0) + 1
+                continue
+
+            # 3. Load and check model safely
+            try:
+                model = onnx.load(str(onnx_path), load_external_data=False)
+                onnx.checker.check_model(model)
+            except Exception as e:
+                skipped_reasons["checker_fail"] = skipped_reasons.get("checker_fail", 0) + 1
+                logger.debug(f"Failed to load or check model {rel_path}: {e}")
+                continue
+
+            # 4. Extract opset
+            opset = 17
+            if model.opset_import:
+                for imp in model.opset_import:
+                    if imp.domain == "":
+                        opset = max(opset, imp.version)
+
+            # 5. Extract metadata fields
+            name = info.get("group", info.get("pass_name", "pattern"))
+            category = info.get("pass_category", "unknown")
+            pass_name = info.get("pass_name", "")
+
+            req_ops = []
+            for op_entry in info.get("required_ops", []):
+                op_str = op_entry.get("op", "")
+                op_name = op_str.split("::")[-1] if "::" in op_str else op_str
+                req_ops.append(op_name)
+
+            # 6. Construct PatternEntry
+            entry = PatternEntry(
+                name=name,
+                category=category,
+                pass_name=pass_name,
+                rel_path=rel_path,
+                required_ops=req_ops,
+                graph=model.graph,
+                opset=opset,
+                input_info=info.get("input_info", []),
+                output_names=info.get("output_names", [])
+            )
+
+            # 7. Store entry
+            self._entries.append(entry)
+            self._by_category.setdefault(category, []).append(entry)
+            loaded_count += 1
+
+        logger.info(f"Loaded {loaded_count} patterns. Skipped reasons: {skipped_reasons}")
+        return loaded_count
         """Load all valid patterns from pattern_library/.
 
         任务 1：请完成该函数。
@@ -133,6 +208,28 @@ class PatternPool:
 
     @staticmethod
     def _should_exclude(rel_path: str, info: Dict) -> Optional[str]:
+        """Check if a pattern should be excluded. Returns reason or None."""
+        if info.get("pass_category") == "qdq_optimization":
+            return "qdq_category"
+
+        for op_entry in info.get("required_ops", []):
+            op_str = op_entry.get("op", "")
+            
+            if _CUSTOM_DOMAIN in op_str:
+                return "custom_domain"
+            
+            if "::" in op_str:
+                op_name = op_str.split("::")[-1]
+            else:
+                op_name = op_str
+
+            if op_name in _QUANT_OPS:
+                return "quant_op"
+            
+            if op_name in _NONDETERMINISTIC_OPS:
+                return "nondeterministic_op"
+
+        return None
         """Check if a pattern should be excluded. Returns reason or None.
 
         任务 1：请完成该函数。
